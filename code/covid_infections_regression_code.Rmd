@@ -1,7 +1,7 @@
 ---
-title: 'Lab 2: Regression to Study the Spread of Covid-19'
-author: 'w203: Statistics for Data Science'
-date: "10/28/2020"
+title: 'Regression to Study the Spread of Covid-19'
+author: 'Sean Lo'
+date: "04/21/2021"
 output:
   pdf_document: default
   html_document: default
@@ -483,6 +483,14 @@ names(data_final)[names(data_final) == "Rep"] <- "is.rep"
 
 ```
 ## Correlations and Scatter Plots
+```{r}
+#distribution of our output variable not per capita
+
+plot1 <- ggplot(data =data_final, aes(x=cases)) + 
+  geom_histogram(bins= 10, col="lightblue") +
+  labs(title = "Infections Distribution", x = "Cases", y = "Count")
+plot1
+```
 
 ```{r}
 #distribution of our output variable 
@@ -601,6 +609,20 @@ infections_face_mask <- data_high_corr %>%
   (infections_stay_home+infections_face_mask)
 
 ```
+```{r}
+
+final_repp_corr <- data_high_corr %>% 
+  correlate() %>% 
+  focus(is.rep)
+final_repp_corr
+```
+```{r}
+
+final_repp_corr <- data_high_corr %>% 
+  correlate() %>% 
+  focus(infections.per.capita)
+final_repp_corr
+```
 
 ## Linear Regression
 
@@ -657,7 +679,23 @@ stargazer(
   type = 'text')
 ```
 
+```{r}
+#create AIC and BIC dataframe
+AIC <- AIC(limited_model, second_model, third_model, fourth_model)
+BIC <- BIC(limited_model, second_model, third_model, fourth_model)
 
+aic_bic <- full_join(AIC, BIC, by = "df")
+
+names(aic_bic)[names(aic_bic) == "df"] <- "Model"
+aic_bic$Model[aic_bic$Model == 3 ] <- "#1" 
+aic_bic$Model[aic_bic$Model == 6 ] <- "#2" 
+aic_bic$Model[aic_bic$Model == 10 ] <- "#3" 
+aic_bic$Model[aic_bic$Model == 8 ] <- "#4" 
+
+
+aic_bic
+
+```
 
 # CLM Assumptions on second_model
 
@@ -694,7 +732,8 @@ data_high_corr_pred_resids %>%
 data_high_corr_pred_resids %>% 
   ggplot(aes(population.density.per.square.mile, fourth_model_resids)) +
   geom_point() +
-  stat_smooth()
+  stat_smooth()+
+  labs(title = "Model Residuals v.s. Population Density")
 ```
 
 ```{r}
@@ -739,35 +778,3 @@ se_qq <- data_high_corr_pred_resids %>%
 
 se_histo / se_qq
 ```
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
