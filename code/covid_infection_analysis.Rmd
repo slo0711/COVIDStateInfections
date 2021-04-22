@@ -1,0 +1,773 @@
+---
+title: 'Lab 2: Regression to Study the Spread of Covid-19'
+author: 'w203: Statistics for Data Science'
+date: "10/28/2020"
+output:
+  pdf_document: default
+  html_document: default
+---
+```{r setup, include=FALSE, echo=FALSE, message=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(readxl)
+library(dplyr)
+library(stringr)
+library(tidyverse)
+library(tidyr)
+library(ggplot2)
+library(Hmisc)
+library(corrr)
+library(ggplot2)
+library(patchwork)
+library(stargazer)
+library(sandwich)
+library(car)
+
+```
+
+### Data Cleaning
+
+## State Characteristics
+```{r state characteristics read data, include=FALSE}
+#read state characteristics data
+data_state_characteristics <- read.csv(file = 'COVID-19 US state policy database (CUSP) - State Characteristics.csv')
+```
+
+```{r clean data, include=FALSE}
+#lower case all headers and remove last row which is empty
+data_state_characteristics <- head(data_state_characteristics,-1)
+names(data_state_characteristics) <- tolower(names(data_state_characteristics))
+
+```
+
+```{r export, include=FALSE}
+#save CSV
+write.csv(data_state_characteristics,"state_characteristics_clean.csv", 
+          row.names = FALSE)
+```
+
+
+## State of Emergency
+```{r State of emergency data, include="FALSE"}
+
+file_path = "COVID-19 US state policy database (CUSP).xlsx"
+
+df_emr <- read_xlsx(path = file_path,
+                sheet = "State of Emergency",
+                range = "B1:E52",
+                col_types = c("text", "numeric", "date", "date"),
+                trim_ws = TRUE,
+                na = "0")
+
+names(df_emr) <- str_replace_all(names(df_emr), c(" " = ".", "&" = "."))
+
+df_emr$emr.last.update <- seq(ISOdate(2021,3,17), ISOdate(2021,3,17), length.out = 51)
+
+df_emr <- mutate(df_emr, emr.closed.days = ifelse(is.na(State.of.emergency.issued), 0,
+                                              ifelse(is.na(State.of.emergency.expired), emr.last.update - State.of.emergency.issued,
+                                                    State.of.emergency.expired - State.of.emergency.issued)))
+
+# create indicator if state had state of emergency
+df_emr <- mutate(df_emr, emr.flag = ifelse(emr.closed.days > 0, 1, 0) )
+
+# drop unnecessary columns
+df_emr <- subset(df_emr, select = -c(State.FIPS.Code, State.of.emergency.issued,
+                                     State.of.emergency.expired,
+                                     emr.last.update))
+
+```
+
+## Stay at home
+```{r Stay at Home, include="FALSE"}
+df_stayhm <- read_xlsx(path = file_path,
+                sheet = "Stay at Home",
+                range = "B1:G52",
+                col_types = c("text", "numeric", "date", "numeric", "date", "date"),
+                trim_ws = TRUE,
+                na = "0")
+
+names(df_stayhm) <- str_replace_all(names(df_stayhm), c(" " = ".", "/" = ".", "\\*" = "", "-" = "."))
+
+# last date data was updated according to excel ("Information" sheet)
+df_stayhm$stayhm.last.update <- seq(ISOdate(2021,3,17), ISOdate(2021,3,17), length.out = 51)
+
+# these states did not have stay at home orders, they provided optional guidance
+# Their order start dates are also empty in original data
+df_stayhm[df_stayhm$State.Abbreviation == "CT", "End.stay.at.home.shelter.in.place"] <- NA
+df_stayhm[df_stayhm$State.Abbreviation == "KY", "End.stay.at.home.shelter.in.place"] <- NA
+df_stayhm[df_stayhm$State.Abbreviation == "OK", "End.stay.at.home.shelter.in.place"] <- NA
+df_stayhm[df_stayhm$State.Abbreviation == "TX", "End.stay.at.home.shelter.in.place"] <- NA
+
+
+# data is clean, calculate duration of order to stay home
+df_stayhm <- mutate(df_stayhm, stayhm.duration.days = ifelse(is.na(Stay.at.home.shelter.in.place), 0,
+                                              ifelse(is.na(End.stay.at.home.shelter.in.place), 0,
+                                                    End.stay.at.home.shelter.in.place - Stay.at.home.shelter.in.place)))
+
+# create indicator if state had stay at home order
+df_stayhm <- mutate(df_stayhm, stayhm.flag = ifelse(stayhm.duration.days > 0, 1, 0) )
+
+# drop unnecessary columns
+df_stayhm <- subset(df_stayhm, select = -c(State.FIPS.Code,
+                                            stayhm.last.update,
+                                            Stay.at.home.shelter.in.place,
+                                            End.stay.at.home.shelter.in.place,
+Stay.at.home.order.issued.but.did.not.specifically.restrict.movement.of.the.general.public))
+```
+
+## Religious gatherings
+```{r Religious gatherings data, include="FALSE"}
+
+# set indicator if religious gatherings were exempt
+df_stayhm <- mutate(df_stayhm, relgn.gathering.banned.flag = ifelse(is.na(Religious.Gatherings.Exempt.Without.Clear.Social.Distance.Mandate), 1, 0) )
+
+# drop unnecessary columns
+df_stayhm <- subset(df_stayhm, select = -c(Religious.Gatherings.Exempt.Without.Clear.Social.Distance.Mandate))
+
+```
+
+## Face Masks
+```{r Face masks data, include="FALSE"}
+
+df_facemsk <- read_xlsx(path = file_path,
+                sheet = "Face Masks",
+                range = "B1:K52",
+                col_types = c("text", "numeric", "date", "date", "numeric", 
+                              "numeric", "numeric", "date", "date", "date"),
+                trim_ws = TRUE,
+                na = "0")
+
+names(df_facemsk) <- str_replace_all(names(df_facemsk), c(" " = ".", "/" = "."))
+
+# excel says last reviewed date was 2020/09/25 but doc contains data until 2021/03/16
+df_facemsk$facemsk.last.update <- seq(ISOdate(2021,3,16), ISOdate(2021,3,16), length.out = 51)
+
+# Montana (MT) did not have a state wide mask mandate (only implemented in a few counties)
+df_facemsk[df_facemsk$State.Abbreviation == "MT", "End.face.mask.mandate"] <- NA
+
+# data is clean, calculate duration of order to stay home
+df_facemsk <- mutate(df_facemsk, facemsk.duration.days = 
+                                  ifelse(is.na(Public.face.mask.mandate), 0,
+                                    ifelse(is.na(End.face.mask.mandate),
+                                           facemsk.last.update - Public.face.mask.mandate,
+                                      End.face.mask.mandate - Public.face.mask.mandate)))
+
+
+# set indicator if face mask orders were in place
+df_facemsk <- mutate(df_facemsk, facemsk.mandate.flag = ifelse(facemsk.duration.days > 0, 1, 0) )
+
+# set indicator if there was legal enforcement of face masks
+# all NA values in excel are 0, so set them to 0 in data frame
+df_facemsk <- mutate(df_facemsk, No.legal.enforcement.of.face.mask.mandate = 
+                                  ifelse(is.na(No.legal.enforcement.of.face.mask.mandate), 0, 1) )
+
+# create flag for all states that enforced face masks
+df_facemsk <- mutate(df_facemsk, facemsk.enforced.flag = 
+                                  ifelse(No.legal.enforcement.of.face.mask.mandate == 1, 0, 1) )
+
+# drop unnecessary columns
+df_facemsk <- subset(df_facemsk, select = -c(State.FIPS.Code,
+                                             Public.face.mask.mandate,
+                                             End.face.mask.mandate,
+                                             Business.face.mask.mandate,
+                                             facemsk.last.update,
+Second.mandate.for.facemasks.by.all.individuals.in.public.places,
+Face.mask.mandate.enforced.by.fines,
+Face.mask.mandate.enforced.by.criminal.charge.citation,
+No.legal.enforcement.of.face.mask.mandate,
+Attempt.by.state.government.to.prevent.local.governments.from.implementing.face.mask.orders
+))
+
+# rename columns
+#colnames(df)[2] <- "newname_for_col_2"
+
+```
+
+## Closures and re-openings
+```{r Closures and re-openings data, include="FALSE"}
+df <- read_xlsx(path = file_path,
+                sheet = "Closures & Reopening",
+                range = "A1:AO52",
+                col_types = c("text", "text", "numeric",
+                              "date", "date", "date", "date", "date",
+                              "date", "date", "date", "date", "numeric",
+                              "date", "date", "date", "numeric", "date",
+                              "date", "date", "date", "date", "date",
+                              "date", "date", "date", "date", "date",
+                              "date", "date", "date", "date", "date",
+                              "date", "date", "date", "date", "date",
+                              "date", "date", "date"),
+                trim_ws = TRUE,
+                na = "0"
+                )
+
+names(df) <- str_replace_all(names(df), c(" " = ".", "&" = ".", "-" = ".", "/" = "."))
+
+# Drop columns not used in EDA and calculations (bars, casinos, hair salons, etc)
+df <- subset(df, select = -c(State, State.FIPS.Code,
+                             Closed.K.12.public.schools,
+                             Closed.bars,
+                             Closed.casinos,
+                             Reopened.bars,
+                             Reopened.casinos,
+                             Closed.bars.x2,
+                             Reopened.bars.x2,
+                             Closed.bars.x3,
+                             Closed.casinos.x2,
+                             Reopened.casinos.x2,
+                             Closed.other.non.essential.businesses,
+                             Mention.of.tribal.casinos,
+                             Closed.businesses.overnight,
+                             Began.to.reopen.businesses.statewide,
+                             Reopened.hair.salons.barber.shops,
+                             Reopened.religious.gatherings, # this is available elsewhere
+                             Reopened.other.non.essential.retail,
+                             Allowed.businesses.to.reopen.overnight,
+                             Began.to.re.close.bars,
+                             Closed.hair.salons.barber.shops.x2
+                             ))
+
+###########################################################################
+# Nursing homes - visits banned
+df$nursinghm.last.update <- seq(ISOdate(2020,10,2), ISOdate(2020,10,2), length.out = 51)
+
+# number of days visits banned to nursing homes  
+df <- mutate(df, nursinghm.closed.days = ifelse(is.na(Banned.visitors.to.nursing.homes), 0,
+                                        nursinghm.last.update - Banned.visitors.to.nursing.homes
+                                        ))
+
+# Create indicator column for restaurants
+df <- mutate(df, nursinghm.flag = ifelse(nursinghm.closed.days > 0, 1, 0) )
+
+# Drop restaurant columns not needed
+df <- subset(df, select = -c(Banned.visitors.to.nursing.homes, nursinghm.last.update))
+
+
+###########################################################################
+# Restaurants - days closed x1
+df <- mutate(df, rest.closed.days.x1 = ifelse(is.na(Reopened.restaurants), 0,
+                                              ifelse(is.na(Closed.restaurants), 0,
+                                                    Reopened.restaurants - Closed.restaurants)))
+# Restaurants - days closed x2
+# Big assumption: using date of March 4th 2021 as final date of re-opening ("Information" sheet, row 80)
+df$rest.last.update <- seq(ISOdate(2021,3,4), ISOdate(2021,3,4), length.out = 51)
+
+df <- mutate(df, rest.closed.days.x2 = ifelse(is.na(Closed.restaurants.x2), 0,
+                                              ifelse(is.na(Reopened.restaurants.x2), rest.last.update - Closed.restaurants.x2,
+                                                    Reopened.restaurants.x2 - Closed.restaurants.x2)))
+
+# Restaurants - days closed x3
+df <- mutate(df, rest.closed.days.x3 = ifelse(is.na(Closed.restaurants.x3), 0,
+                                              ifelse(is.na(Reopened.restaurants.x3), rest.last.update - Closed.restaurants.x3,
+                                                    Reopened.restaurants.x3 - Closed.restaurants.x3)))
+
+# Restaurants - total duration
+df <- mutate(df, rest.duration.days = rest.closed.days.x1 + rest.closed.days.x2 + rest.closed.days.x3)
+
+# Create indicator column for restaurants
+df <- mutate(df, rest.flag = ifelse(rest.duration.days > 0, 1, 0) )
+
+# Drop restaurant columns not needed
+df <- subset(df, select = -c(Closed.restaurants, Reopened.restaurants,
+                             Closed.restaurants.x2, Reopened.restaurants.x2,
+                             Closed.restaurants.x3, Reopened.restaurants.x3,
+                             Initially.reopened.restaurants.for.outdoor.dining.only,
+                             rest.last.update))
+
+
+
+###########################################################################
+# Day Cares - days closed
+df <- mutate(df, daycare.closed.days = ifelse(is.na(Reopened.child.care), 0,
+                                              ifelse(is.na(Closed.day.cares), 0,
+                                                    Reopened.child.care - Closed.day.cares)))
+
+# Create indicator column for day cares
+df <- mutate(df, daycare.flag = ifelse(daycare.closed.days > 0, 1, 0) )
+
+# Drop unnecessary columns
+df <- subset(df, select = -c(Closed.day.cares, Reopened.child.care))
+
+###########################################################################
+# Movies - days closed
+df$movies.last.update <- seq(ISOdate(2021,3,4), ISOdate(2021,3,4), length.out = 51)
+
+# Movies closed x1
+# if close is there && reopen not there 
+# then last date - close date
+df <- mutate(df, movies.closed.days.x1 = ifelse(is.na(Closed.movie.theaters) == FALSE
+                                                & is.na(Reopened.movie.theaters) == TRUE,
+                                                movies.last.update - Closed.movie.theaters,
+                                          # if close1 is there && reopen1 is there 
+                                          # then reopen - close
+                                          ifelse(is.na(Closed.movie.theaters) == FALSE
+                                              & is.na(Reopened.movie.theaters) == FALSE,
+                                              Reopened.movie.theaters - Closed.movie.theaters,
+                                              0)))
+
+# Movies closed x2
+# if close2 is there && reopen2 is there 
+# then reopen2 - close2
+df <- mutate(df, movies.closed.days.x2 = ifelse(is.na(Closed.movie.theaters.x2) == FALSE
+                                          & is.na(Reopened.movie.theaters.x2) == FALSE,
+                                          Reopened.movie.theaters.x2 - Closed.movie.theaters.x2,
+# if close2 is there && reopen2 is not there 
+# then last update - close2
+                                        ifelse(is.na(Closed.movie.theaters.x2) == FALSE
+                                               & is.na(Reopened.movie.theaters.x2) ==  TRUE,
+                                               movies.last.update - Closed.movie.theaters.x2,
+                                               0)))
+
+# if close is not there && close2 is NA && close3 is NA (South Dakota rule)
+# then 0
+
+# Movies - total duration closed
+df <- mutate(df, movies.duration.days = movies.closed.days.x1 + movies.closed.days.x2)
+
+# Create indicator column for day cares
+df <- mutate(df, movies.flag = ifelse(movies.duration.days > 0, 1, 0) )
+
+
+# delete unnecessary columns
+df <- subset(df, select = -c(Closed.movie.theaters, Reopened.movie.theaters,
+                                     Closed.movie.theaters.x2, Reopened.movie.theaters.x2,
+                                     movies.last.update))
+
+
+###########################################################################
+# Gyms - days closed
+# Reopened.gyms.x2 has 01/4/2021 as the last date
+df$gym.last.update <- seq(ISOdate(2021,3,4), ISOdate(2021,3,4), length.out = 51)
+
+# Gym closed x1
+# if !closed & !closed2
+# then 0
+# if closed & reopened
+# then reopened - closed
+# if closed & !reopened
+# then last update - closed
+df <- mutate(df, gym.closed.days.x1 = ifelse(is.na(Closed.gyms) & is.na(Closed.gyms.x2), 0,
+                                        ifelse(!is.na(Closed.gyms) & !is.na(Reopened.gyms),
+                                               Reopened.gyms - Closed.gyms,
+                                          ifelse(!is.na(Closed.gyms) & is.na(Reopened.gyms),
+                                               gym.last.update - Closed.gyms, NA))))
+
+# Gym closed x2
+# if closed2 & reopened2
+# then reopened2 - closed2
+# if closed2 & !reopened2
+# then last update - closed2
+df <- mutate(df, gym.closed.days.x2 = ifelse(!is.na(Closed.gyms.x2) & !is.na(Reopened.gyms.x2),
+                                              Reopened.gyms.x2 - Closed.gyms.x2,
+                                        ifelse(!is.na(Closed.gyms.x2) & is.na(Reopened.gyms.x2),
+                                              gym.last.update - Closed.gyms.x2,
+                                              0)))
+
+# Gym - total duration closed
+df <- mutate(df, gyms.duration.days = gym.closed.days.x1 + gym.closed.days.x2)
+
+# Create indicator column for day cares
+df <- mutate(df, gyms.flag = ifelse(gyms.duration.days > 0, 1, 0) )
+
+
+# Drop columns not needed for gyms
+df <- subset(df, select = -c(Closed.gyms, Reopened.gyms,
+                                     Closed.gyms.x2, Reopened.gyms.x2,
+                                     gym.last.update))
+
+
+# date set to 1899-12/31 when 0 in excel
+# bars were closed a 3rd time, re-opening for 3rd time is not in data
+# religous gatherings were not closed, but were reopened.
+
+
+#getwd()
+#?read_xlsx
+```
+
+## NY COVID Death Data
+
+```{r}
+st_to_state <- function(x){
+  state.abb[which(state.name == x)]
+}
+
+NYT_Data <- read_csv("https://raw.githubusercontent.com/nytimes/covid-19-data/master/us-states.csv")
+total_covid <- NYT_Data %>% 
+  group_by(state) %>% 
+  arrange(desc(date)) %>% 
+  slice(1) %>% 
+  filter(!state %in% c("District of Columbia", "Guam", "Northern Mariana Islands", "Puerto Rico", "Virgin Islands")) %>% 
+  mutate(state = st_to_state(state))
+
+write_csv(total_covid, "covid_cases_deaths.csv")
+
+```
+## State Legislation
+
+```{r}
+
+legis_control <- read.csv(file = 'Legis Control - Sheet1.csv') 
+legis_control_clean <-  legis_control %>% 
+  mutate(state = st_to_state(State))
+
+legis_control_clean <- subset(legis_control_clean, select = -c(State))
+names(legis_control_clean)[names(legis_control_clean) == "state"] <- "State.Abbreviation"
+
+```
+
+## 2020 Population
+
+```{r}
+
+population_2020 <- read.csv(file = '2020_population.csv') 
+
+names(population_2020)[names(population_2020) == "state"] <- "State.Abbreviation"
+names(population_2020)[names(population_2020) == "pop"] <- "most_recent_population"
+```
+
+```{r}
+#join data sets
+join_1 <- full_join(df, df_emr, by = "State.Abbreviation")
+join_2 <- full_join(join_1, df_facemsk, by = "State.Abbreviation")
+join_3 <- full_join(join_2, df_stayhm, by = "State.Abbreviation")
+
+#rename columns to the same column name to join
+names(data_state_characteristics)[names(data_state_characteristics) == "state.abbreviation"] <- "State.Abbreviation"
+names(total_covid)[names(total_covid) == "state"] <- "State.Abbreviation"
+
+join_4 <- full_join(join_3, data_state_characteristics, by = "State.Abbreviation")
+join_5 <- full_join(join_4, legis_control_clean, by = "State.Abbreviation")
+
+#remove district of columbia
+join_5 <- join_5[join_5$State.Abbreviation != "DC", ] 
+
+#last join and rename as data_clean
+join_6 <- full_join(join_5, population_2020, by = "State.Abbreviation")
+data_clean <- full_join(join_6, total_covid, by = "State.Abbreviation")
+
+#create new column COVID infections per capita
+data_clean$infections.per.capita <- data_clean$cases / data_clean$most_recent_population
+
+write_csv(data_clean, "data_clean.csv")
+
+```
+
+### EDA
+
+```{r}
+#read final data set for EDA
+data_final <- read.csv(file = 'data_clean.csv') 
+
+#here we plot counts of the party affiliation, since we're only looking 
+#at democrats v.s. rep, we can remove the 2 outlier states
+pos_hist <- ggplot(data_final, aes(x=Legislature.Control))+
+  geom_bar(color="darkblue", fill="lightblue") +
+  labs(title = "Bar Chart of State Legislature Party", size =5,
+              x = "State Legislature Party)", y = "Count"
+       ) 
+pos_hist
+
+#drop MN and NE then, one hot encode the party affilation variable
+data_final <- data_final[data_final$State.Abbreviation != "MN", ] 
+data_final <- data_final[data_final$State.Abbreviation != "NE", ] 
+data_final <- data_final[data_final$State.Abbreviation != "WY", ] 
+
+data_final <-data_final %>% 
+  mutate(value = 1)  %>% 
+  spread(Legislature.Control, value,  fill = 0 ) 
+
+#drop extra column and rename to boolean indicator
+data_final <- subset(data_final, select = -c(Dem))
+names(data_final)[names(data_final) == "Rep"] <- "is.rep"
+
+```
+## Correlations and Scatter Plots
+
+```{r}
+#distribution of our output variable 
+
+plot1 <- ggplot(data =data_final, aes(x=infections.per.capita)) + 
+  geom_histogram(bins= 10, col="lightblue") +
+  labs(title = "Infections Per Capita Distribution", x = "Infections Per Capita", y = "Count")
+plot1
+```
+
+
+```{r}
+#temp df without state variable
+#data_final_all_num <- subset(data_final, select = -c(State.Abbreviation))
+data_final_all_num <- subset(data_final, select = -c(State.Abbreviation, state, State.Control, date))
+
+#data_final_all_num <- data_final_all_num %>%
+#  select(infections.per.capita, everything())
+
+#cor(data_final_all_num[-1], data_final_all_num$infections.per.capita) 
+
+corr_infections <- data_final_all_num %>% 
+  correlate() %>% 
+  focus(infections.per.capita)
+corr_infections
+
+```
+Note: top 3 negative correlations; mental.health, rest.duration, stay home duration
+top 3 positive correlations; is.rep, poverty.line, pop density per square mile
+
+top 6 corr regardless of sign: is.rep, mental.health, rest.duration, poverty line,
+stayhome, movies.duration, facemsk.duration.days	
+
+```{r}
+
+is_repp_corr <- data_final_all_num %>% 
+  correlate() %>% 
+  focus(is.rep)
+is_repp_corr
+```
+
+Now we run correlations across is.rep against all other variables to check if
+there is possible multicollinearity against other input variables. There doesn't
+seem to be anything that is near -1 or 1, that shows potential signs of a 
+pure linear relationship. Taking note of face.mask, rest.duration, and mental.health
+as variables with ~0.5 collinearity.
+
+```{r} 
+#create new df of the top 6-7 inputs we want to graph out a corr matrix for
+#these are ones we will potentially use to start our "big" model with 
+
+data_high_corr <- data_final_all_num %>%
+  select(infections.per.capita, is.rep, mental.health.professionals.per.100.000.population.in.2019,
+        rest.duration.days, percent.living.under.the.federal.poverty.line..2018.,population.density.per.square.mile,          movies.duration.days,stayhm.duration.days	,facemsk.duration.days	)
+
+infections_party <- data_high_corr %>%
+  ggplot(aes(x = is.rep, y=infections.per.capita)) +
+  geom_point() +
+  geom_smooth(method="lm") +
+   xlab('Republican Boolean') +
+   ylab('Infections Per Capita') 
+
+infections_mental <- data_high_corr %>%
+  ggplot(aes(x = mental.health.professionals.per.100.000.population.in.2019, y=infections.per.capita)) +
+  geom_point() +
+  geom_smooth(method="lm") +
+   xlab('Mental Health Professionals Per 100,000') +
+   ylab('Infections Per Capita') 
+
+infections_rest_duration <- data_high_corr %>%
+  ggplot(aes(x = rest.duration.days, y=infections.per.capita)) +
+  geom_point() +
+  geom_smooth(method="lm") +
+   xlab('Rest Duration Days') +
+   ylab('Infections Per Capita') 
+
+infections_poverty <- data_high_corr %>%
+  ggplot(aes(x = percent.living.under.the.federal.poverty.line..2018., y=infections.per.capita)) +
+  geom_point() +
+  geom_smooth(method="lm") +
+   xlab('Percent living Under the Poverty Line') +
+   ylab('Infections Per Capita') 
+
+infections_pop_density <- data_high_corr %>%
+  ggplot(aes(x = population.density.per.square.mile, y=infections.per.capita)) +
+  geom_point() +
+  geom_smooth(method="lm") +
+   xlab('Population Density Per Square Mile') +
+   ylab('Infections Per Capita') 
+
+infections_movie <- data_high_corr %>%
+  ggplot(aes(x = movies.duration.days, y=infections.per.capita)) +
+  geom_point() +
+  geom_smooth(method="lm") +
+   xlab('Movie Theatres Closed in Days') +
+   ylab('Infections Per Capita') 
+
+infections_stay_home <- data_high_corr %>%
+  ggplot(aes(x = stayhm.duration.days, y=infections.per.capita)) +
+  geom_point() +
+  geom_smooth(method="lm") +
+   xlab('Stay at Home Order in Days') +
+   ylab('Infections Per Capita') 
+
+infections_face_mask <- data_high_corr %>%
+  ggplot(aes(x = facemsk.duration.days, y=infections.per.capita)) +
+  geom_point() +
+  geom_smooth(method="lm") +
+   xlab('Facemask Duration Days') +
+   ylab('Infections Per Capita') 
+
+(infections_party + infections_mental)/
+  (infections_rest_duration+infections_poverty)
+
+(infections_pop_density+infections_movie)/
+  (infections_stay_home+infections_face_mask)
+
+```
+
+## Linear Regression
+
+```{r}
+
+#limited model 
+limited_model <- lm(infections.per.capita ~ is.rep, 
+            data = data_high_corr)
+
+summary(limited_model)
+```
+```{r}
+
+#second model
+second_model <- lm(infections.per.capita ~ is.rep + population.density.per.square.mile + percent.living.under.the.federal.poverty.line..2018. + facemsk.duration.days
+            ,data = data_high_corr)
+
+summary(second_model)
+```
+
+
+```{r}
+
+#third model
+third_model <- lm(infections.per.capita ~ is.rep + 
+        mental.health.professionals.per.100.000.population.in.2019 +
+        rest.duration.days+ percent.living.under.the.federal.poverty.line..2018.
+        +population.density.per.square.mile
+        +movies.duration.days
+        +stayhm.duration.days
+        +facemsk.duration.days
+            ,data = data_high_corr)
+
+summary(third_model)
+```
+```{r}
+
+#fourth model
+fourth_model <- lm(infections.per.capita ~ is.rep + population.density.per.square.mile + I(population.density.per.square.mile^2) + I(population.density.per.square.mile^3) + percent.living.under.the.federal.poverty.line..2018. + facemsk.duration.days, data = data_high_corr)
+
+summary(fourth_model)
+```
+
+```{r}
+#get robust ses
+rse <- function(model) { 
+  sqrt(diag(vcovHC(model)))
+}
+
+#stargazer 
+stargazer(
+  limited_model, second_model, third_model, fourth_model,
+  se = list(rse(limited_model), rse(second_model), rse(third_model), rse(fourth_model)), 
+  type = 'text')
+```
+
+
+
+# CLM Assumptions on second_model
+
+```{r}
+data_high_corr_pred_resids <- data_high_corr%>% 
+  mutate(
+    fouth_model_preds = predict(fourth_model), 
+    fourth_model_resids = resid(fourth_model)
+  ) 
+
+```
+
+
+1. I,I.D
+
+2. Linear Conditional Expectation
+
+```{r}
+data_high_corr_pred_resids %>% 
+  ggplot(aes(fouth_model_preds, fourth_model_resids)) +
+  geom_point() +
+  stat_smooth()
+```
+
+
+```{r, message==FALSE}
+data_high_corr_pred_resids %>% 
+  ggplot(aes(is.rep, fourth_model_resids)) +
+  geom_point() +
+  stat_smooth()
+```
+
+```{r}
+data_high_corr_pred_resids %>% 
+  ggplot(aes(population.density.per.square.mile, fourth_model_resids)) +
+  geom_point() +
+  stat_smooth()
+```
+
+```{r}
+data_high_corr_pred_resids %>% 
+  ggplot(aes(percent.living.under.the.federal.poverty.line..2018., fourth_model_resids)) +
+  geom_point() +
+  stat_smooth()
+```
+
+```{r}
+data_high_corr_pred_resids %>% 
+  ggplot(aes(facemsk.duration.days, fourth_model_resids)) +
+  geom_point() +
+  stat_smooth()
+```
+
+
+
+3. No Perfict Collinearity
+
+```{r}
+vif(fourth_model)
+```
+
+4. Homoskedastic Error
+
+```{r}
+plot(fourth_model, which=3)
+```
+
+
+5. Normally Distributed Errors
+
+```{r}
+se_histo <- data_high_corr_pred_resids %>% 
+  ggplot(aes(x = fourth_model_resids)) + 
+  geom_histogram()
+  
+se_qq <- data_high_corr_pred_resids %>% 
+  ggplot(aes(sample = fourth_model_resids)) + 
+  stat_qq() + stat_qq_line()
+
+se_histo / se_qq
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
